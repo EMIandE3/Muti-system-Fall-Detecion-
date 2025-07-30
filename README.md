@@ -326,3 +326,7 @@ https://blog.csdn.net/liaoqingjian/article/details/118927478
 https://blog.csdn.net/James_Bond_slm/article/details/117432357
 
 https://github.com/ermongroup/Wifi_Activity_Recognition/tree/master
+
+## 注意
+
+由于部分文件过大，没有上传至此，如有需要，可联系22331171@zju.edu.cn，也欢迎各位交流讨论！
