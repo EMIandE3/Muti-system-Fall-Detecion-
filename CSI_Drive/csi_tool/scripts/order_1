@@ -1,0 +1,41 @@
+有用网址：
+https://blog.csdn.net/u014645508/article/details/82993718
+
+https://blog.csdn.net/u014645508/article/details/81359409
+
+https://blog.csdn.net/ErinLi1998/article/details/89442060
+
+https://blog.csdn.net/James_Bond_slm/article/details/117432357?spm=1001.2101.3001.6650.6&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7Edefault-6.pc_relevant_default&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7Edefault-6.pc_relevant_default&utm_relevant_index=11
+
+复制intel-5300-csi-github-master.tar.gz压缩包至home文件：
+sudo cp -i intel-5300-csi-github-master.tar.gz /home
+
+创建超级用户：
+sudo passwd
+sudo su
+
+git包下载的前置准备：
+git config --global url."https://".insteadOf git://
+git config --global http.postBuffer 50M
+
+git包下载：
+git clone https://github.com/dhalperi/linux-80211n-csitool-supplementary.git
+
+修改驱动文件：
+sudo gedit /home/intel-5300-csi-github/drivers/net/wireless/iwlwifi/dvm/main.c
+
+开启AP模式：
+sudo create_ap --ieee80211n wlan0 eth0 AP_csi_wwy --no-virt
+
+AP模式用：
+ping 192.168.12.50 -i 0.5
+
+下载某一文件时需要：
+apt-get install libncurses5-dev
+
+等待接收数据:  sudo /home/sdjc/linux-80211n-csitool-supplementary/netlink/log_to_file log.dat 
+
+恢复网络：sudo service network-manager start
+
+收不到数时执行 sudo update-grub
+

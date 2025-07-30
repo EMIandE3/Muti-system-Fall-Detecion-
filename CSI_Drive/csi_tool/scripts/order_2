@@ -1,0 +1,12 @@
+https://blog.csdn.net/u014645508/article/details/82993718
+
+https://blog.csdn.net/u014645508/article/details/81359409
+
+https://blog.csdn.net/ErinLi1998/article/details/89442060
+
+sudo cp -i intel-5300-csi-github-master.tar.gz /home
+
+sudo passwd
+sudo su
+
+收不到数时执行sudo update-grub

@@ -1,0 +1,14 @@
+cd linux-80211n-csitool-supplementary/injection/
+./setup_inject.sh wlan0 13 HT20 
+./setup_inject.sh wlan0 64 HT20 
+sudo echo 0x4101 | sudo tee /sys/kernel/debug/ieee80211/phy0/iwlwifi/iwldvm/debug
+#sudo echo 0x1c101 | sudo tee /sys/kernel/debug/ieee80211/phy0/iwlwifi/iwldvm/debug
+sudo ./random_packets 100000 100 1
+
+以1ms的频率发，发10s的包：
+sudo ./random_packets 1000000 100 1 900  
+
+
+第一个参数：包的数量 第二个参数：包的长度 第四个参数：包与包间delay（微秒)
+
+5G频段不能接收，只能用2.4G的频段，也就是13 HT20

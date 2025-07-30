@@ -1,0 +1,5 @@
+cd linux-80211n-csitool-supplementary/injection
+./setup_monitor_csi.sh wlan0 13 HT20
+./setup_monitor_csi.sh wlan0 64 HT20
+cd ../netlink/csi_dat
+sudo /home/sdjc/linux-80211n-csitool-supplementary/netlink/log_to_file log.dat
