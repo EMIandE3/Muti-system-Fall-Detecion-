@@ -317,11 +317,7 @@ predict_5_cls.py用于加载一个预先训练好的TensorFlow模型，并使用
 
 该文件夹并没有实际用于项目中，只是记录了在项目进行中的一些尝试和测试，该文件夹下包含pycode、Vgg_classfy两个文件夹，pycode文件夹下的文件是一个简单的视频接收服务器的实现，使用Python的socket库和OpenCV库，通过监听指定端口，接收来自客户端发送的视频帧，并将每帧视频显示出来。
 
-
-
-
-
-；Vgg_classfy文件夹用于vgg16网络处理一维CSI信息，其中同样包含网络训练和预测的功能，训练数据采用csv类型。
+Vgg_classfy文件夹用于vgg16网络处理一维CSI信息，其中同样包含网络训练和预测的功能，训练数据采用csv类型。
 
 ## 相关参考
 
@@ -329,3 +325,4 @@ https://blog.csdn.net/liaoqingjian/article/details/118927478
 
 https://blog.csdn.net/James_Bond_slm/article/details/117432357
 
+https://github.com/ermongroup/Wifi_Activity_Recognition/tree/master
