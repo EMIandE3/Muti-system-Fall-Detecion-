@@ -293,7 +293,7 @@ sudo ./log_to_file temp 3
 
 ## Wifi_Detection文件夹
 
-该文件夹内包含了数据预处理、模型训练、调用模型的文件，数据集采用的是csi tools 采集的dat文件，可利用datafile_convert_final文件夹下的Activity_datfile_to_csvfile 和 interp_filename_change_for_input_3文件对文件类型进行转换。client_csi_fileread.m和recv.py用于服务器数据的传输
+该文件夹内包含了数据预处理、模型训练、调用模型的文件，数据集采用的是csi tools 采集的dat文件，可利用datafile_convert_final文件夹下的Activity_datfile_to_csvfile 和 interp_filename_change_for_input_3文件对文件类型进行转换。
 
 ### 各文件的作用
 
@@ -304,6 +304,8 @@ cross_vali_input_data_train.py定义了一个名为 `DataSet` 的类，用于处
 cross_vali_recurrent_network_wifi_activity.py实现了一个基于TensorFlow的循环神经网络（RNN）模型，用于对WiFi活动数据进行分类。代码中包含了数据导入、模型定义、训练过程和评估过程。RNN模型中使用了一层LSTM块，隐藏层特征数量为200，遗忘门偏置项为1.0.
 
 predict_5_cls.py用于加载一个预先训练好的TensorFlow模型，并使用该模型对新的数据进行预测。主要包括加载模型、设置输入和输出节点、以及执行预测操作。
+
+client_csi_fileread.m和recv.py用于服务器数据的传输。
 
 ### 结果展示
 
@@ -2060,7 +2062,7 @@ end
 
 **（2）乒乓操作的核心目的**
 
-假设存在一个**CSI 采集程序**，持续将实时采集的 CSI 数据写入`csi_0.mat`和`csi_1.mat`（例如：采集程序写`csi_0.mat`时，客户端读`csi_1.mat`；采集程序写完`csi_0.mat`切换到写`csi_1.mat`时，客户端切换到读`csi_0.mat`），通过 “读写分离” 避免：
+假设存在一个**CSI 采集程序**，cc（例如：采集程序写`csi_0.mat`时，客户端读`csi_1.mat`；采集程序写完`csi_0.mat`切换到写`csi_1.mat`时，客户端切换到读`csi_0.mat`），通过 “读写分离” 避免：
 
 - 文件锁定导致的读取失败；
 - 数据写入不完整时读取到 “半残数据”。
@@ -2146,6 +2148,413 @@ write(my_tcp,s_pt, "string");
   3. 增加数据校验（如 CRC 校验），进一步确保数据传输的完整性；
   4. 手动停止逻辑（如监听键盘输入`Ctrl+C`，执行`echotcpip("off")`和`clear my_tcp`释放资源）。
 
-### 数据传输路线
+#### 7、CSI 采集程序
 
-#### pycode文件夹
+下面是针对**乒乓操作**设计的 CSI 采集程序，基于 MATLAB 编写（与之前的 TCP 发送程序环境一致）。该程序核心功能是：从实时 CSI 数据源（如硬件网卡、模拟 dat 文件流）持续读取原始 CSI 数据，解析出相位（Phase）和幅度（Mag）信息，并通过**乒乓逻辑交替写入`csi_0.mat`和`csi_1.mat`**，确保与 TCP 发送端的乒乓读取逻辑完全兼容，避免文件读写冲突。
+
+##### CSI 采集程序（MATLAB 版）
+
+##### 程序说明
+
+1. 数据源适配：支持两种 CSI 输入方式（可按需切换）：
+   - 模拟实时数据源：从本地 CSI dat 文件（二进制 / 文本格式）按批次读取，模拟硬件实时采集；
+   - 真实硬件数据源：预留 Intel 5300/AX200 等网卡的 CSI 采集接口（需配合对应驱动）。
+2. **乒乓写入逻辑**：用`write_flag`控制交替写入`csi_0.mat`和`csi_1.mat`，每次写入**一批数据块**（避免频繁 IO），写完后立即切换文件，确保 TCP 发送端可无缝读取。
+3. **数据格式兼容**：写入的 mat 文件格式与 TCP 发送端完全一致（元胞数组`rx`，每个元胞包含`CSI.Phase`和`CSI.Mag`结构体），无需额外格式转换。
+4. **安全退出**：支持`Ctrl+C`手动停止，停止前确保当前批次数据完整写入，避免 mat 文件损坏。
+
+##### 完整代码
+
+```matlab
+clc; clear; close all;
+
+%% ====================== 1. 配置参数（按需修改）======================
+% 1.1 文件路径配置
+dat_file_path = './real_time_csi.dat';  % 原始CSI dat文件路径（模拟硬件输出）
+mat_save_dir = './';                    % mat文件保存目录（与TCP发送端一致）
+file_0 = fullfile(mat_save_dir, 'csi_0.mat');  % 乒乓文件1
+file_1 = fullfile(mat_save_dir, 'csi_1.mat');  % 乒乓文件2
+
+% 1.2 采集参数配置
+batch_size = 10;       % 每批写入的数据块数量（避免频繁IO，可调整）
+sample_rate = 1000;      % 模拟采集频率：每秒采集10个数据块（真实硬件需匹配实际速率）
+csi_subcarriers = 90;  % CSI子载波数量（与TCP发送端n_input=90一致）
+
+% 1.3 乒乓控制初始化
+write_flag = 0;        % 0→写入csi_0.mat，1→写入csi_1.mat
+rx_buffer = {};        % 数据缓存：暂存当前批次的CSI数据块
+is_running = true;     % 采集运行标志（控制循环）
+
+%% ====================== 2. 注册安全退出回调（避免文件损坏）======================
+% 捕获Ctrl+C，确保当前批次数据写入后再退出
+registerCleanup(@() cleanup());
+
+function cleanup()
+    is_running = false;
+    % 若缓存中有未写入的数据，强制写入当前文件
+    if ~isempty(rx_buffer)
+        save_current_batch();
+        fprintf('\n安全退出：已将缓存中%d个数据块写入文件\n', length(rx_buffer));
+    end
+    fprintf('CSI采集程序已停止\n');
+end
+
+%% ====================== 3. 核心函数：写入当前批次数据到mat文件======================
+function save_current_batch()
+    global write_flag file_0 file_1 rx_buffer;
+    
+    % 1. 确定当前写入的文件
+    current_mat_file = (write_flag == 0) ? file_0 : file_1;
+    
+    % 2. 保存为mat文件（格式：元胞数组rx，与TCP发送端兼容）
+    % 每个元胞是结构体：rx{idx}.CSI.Phase (1×csi_subcarriers)、rx{idx}.CSI.Mag (1×csi_subcarriers)
+    save(current_mat_file, 'rx_buffer', '-v7.3');  % -v7.3支持大文件
+    
+    % 3. 日志输出
+    fprintf('[乒乓写入] 已写入%s | 数据块数量：%d | 时间：%s\n', ...
+        current_mat_file, length(rx_buffer), datestr(now, 'HH:MM:SS'));
+    
+    % 4. 清空缓存，为下一批数据准备
+    rx_buffer = {};
+end
+
+%% ====================== 4. 核心函数：从dat文件读取并解析CSI数据======================
+function [csi_phase, csi_mag] = read_csi_from_dat(fid)
+    % 说明：需根据你的CSI dat文件格式修改解析逻辑！
+    % 以下为"文本格式dat"的示例解析（每行对应1个数据块，Phase和Mag用逗号分隔）
+    % 若为二进制dat，需用fread()替代fgetl()，并按硬件协议解析（如Intel 5300的二进制格式）
+    
+    % 读取一行数据（模拟1个CSI数据块）
+    line = fgetl(fid);
+    if line == -1  % 若dat文件读完，回到文件开头（模拟循环采集）
+        fseek(fid, 0, 'bof');
+        line = fgetl(fid);
+    end
+    
+    % 解析相位（前90个数值）和幅度（后90个数值）
+    csi_values = str2num(line);
+    csi_phase = csi_values(1:csi_subcarriers);  % 相位：1×90
+    csi_mag = csi_values(csi_subcarriers+1:end); % 幅度：1×90
+end
+
+%% ====================== 5. 主采集循环（持续运行）======================
+fprintf('CSI采集程序启动 | 模拟采集频率：%d Hz | 批次大小：%d\n', sample_rate, batch_size);
+fprintf('按Ctrl+C可停止采集\n');
+
+% 打开CSI dat文件（只读模式）
+fid = fopen(dat_file_path, 'r');
+if fid == -1
+    error('无法打开CSI dat文件：%s，请检查路径是否正确', dat_file_path);
+end
+
+try
+    while is_running
+        % 5.1 读取1个CSI数据块并解析
+        [csi_phase, csi_mag] = read_csi_from_dat(fid);
+        
+        % 5.2 构造CSI结构体（与TCP发送端格式一致）
+        csi_struct.CSI.Phase = csi_phase;
+        csi_struct.CSI.Mag = csi_mag;
+        
+        % 5.3 将数据块加入缓存
+        rx_buffer{end+1} = csi_struct;
+        
+        % 5.4 若缓存达到批次大小，写入当前mat文件并切换乒乓标志
+        if length(rx_buffer) >= batch_size
+            save_current_batch();  % 写入当前文件
+            write_flag = 1 - write_flag;  % 切换标志：0→1，1→0
+        end
+        
+        % 5.5 模拟实时采集延迟（匹配硬件采集速率）
+        pause(1 / sample_rate);
+    end
+catch e
+    fprintf('采集过程出错：%s\n', e.message);
+    cleanup();  % 出错时安全退出
+end
+
+% 关闭文件
+fclose(fid);
+```
+
+##### 程序核心逻辑解析
+
+###### 1. 乒乓写入的核心设计
+
+**（1）双文件交替控制**
+
+通过`write_flag`变量实现：
+
+- 当`write_flag=0`时，数据先缓存到`rx_buffer`，缓存满`batch_size`个数据块后，写入`csi_0.mat`；
+- 写入完成后，`write_flag`翻转至 1，下一批数据缓存满后写入`csi_1.mat`；
+- 循环往复，确保 TCP 发送端读取`csi_0.mat`时，采集端正在写入`csi_1.mat`（反之亦然），完全避免读写冲突。
+
+**（2）批次写入优化**
+
+设置`batch_size=10`（可调整），每积累 10 个数据块再写入文件，而非每个数据块都写一次：
+
+- 减少磁盘 IO 次数，提升采集效率（频繁小文件写入会导致 IO 瓶颈）；
+- 保证 TCP 发送端读取时，每个 mat 文件包含足够多的数据块，减少切换频率。
+
+###### 2. CSI 数据解析适配
+
+程序中`read_csi_from_dat`函数是**数据源适配核心**，需根据你的实际 CSI dat 文件格式修改：
+
+**（1）文本格式 dat（示例）**
+
+若 dat 文件为文本格式，每行对应 1 个 CSI 数据块（如`Phase1,Phase2,...,Phase90,Mag1,Mag2,...,Mag90`），当前代码可直接使用。
+
+**（2）二进制格式 dat（真实硬件常用）**
+
+若为 Intel 5300/AX200 等网卡输出的二进制 dat 文件，需替换解析逻辑，示例如下：
+
+```matlab
+function [csi_phase, csi_mag] = read_csi_from_dat(fid)
+    % 示例：Intel 5300网卡二进制CSI格式解析（需根据实际协议调整）
+    % 假设每个数据块包含：头部(4字节) + 相位(90×4字节float) + 幅度(90×4字节float)
+    header = fread(fid, 4, 'uint8');  % 读取头部（跳过，或用于校验）
+    csi_phase = fread(fid, 90, 'float32');  % 读取相位（1×90 float）
+    csi_mag = fread(fid, 90, 'float32');    % 读取幅度（1×90 float）
+end
+```
+
+###### 3. 安全机制设计
+
+**（1）Ctrl+C 安全退出**
+
+通过`registerCleanup`注册退出回调函数，确保：
+
+- 停止采集时，若`rx_buffer`中有未写入的数据，会强制写入当前 mat 文件；
+- 避免因强制退出导致 mat 文件损坏（如仅写入部分数据）。
+
+**（2）dat 文件循环读取**
+
+若 dat 文件数据有限，程序会在读取到文件末尾时（`line == -1`），通过`fseek(fid, 0, 'bof')`回到文件开头，模拟 “无限实时采集”，方便测试。
+
+##### 与 TCP 发送端的配合使用说明
+
+1. **文件路径一致**：确保采集程序的`mat_save_dir`与 TCP 发送程序的 mat 文件读取路径一致（如均为`./`），避免路径错误。
+2. 参数匹配：
+   - `csi_subcarriers=90`需与 TCP 发送端`n_input=90`一致（确保相位 / 幅度维度匹配）；
+   - 采集频率`sample_rate`可根据 TCP 发送端的`batch_size`调整（如 TCP 每次读取 1000 个数据块，采集频率设为 1kHz，则每 1 秒切换一次 mat 文件，效率最高）。
+3. **启动顺序**：先启动**CSI 采集程序**（确保`csi_0.mat`或`csi_1.mat`有数据），再启动 TCP 发送程序，避免发送端读取到空文件。
+
+##### 扩展建议
+
+1. **数据校验**：在写入 mat 文件前，添加相位 / 幅度的范围校验（如排除异常值`NaN`或超出物理范围的数值），提升数据质量。
+2. **文件大小限制**：添加 mat 文件大小监控（如超过 100MB 则清空历史数据），避免磁盘空间不足。
+3. **多线程优化**：若采集频率极高（如 100Hz 以上），可将 “数据读取” 和 “数据写入” 拆分为两个线程，进一步降低延迟。
+
+该程序完全匹配乒乓操作的核心需求，可直接用于测试，或根据你的真实 CSI 硬件和 dat 格式调整后投入实际使用。
+
+#### 8、log_to_file.c
+
+这是一个**Linux 用户态 CSI（信道状态信息）采集程序**，核心功能是通过**NETLINK_CONNECTOR（内核 - 用户态通信机制）** 从 Linux 内核（特指 Intel iwlwifi 无线网卡驱动）实时接收 CSI 原始数据，并将数据结构化存储到指定文件中，同时支持定时退出和优雅的资源释放。它是 CSI 数据采集链路中 “内核数据接收→用户态存储” 的关键环节，为后续数据处理（如 MATLAB 乒乓写入 mat 文件、TCP 传输）提供原始数据源。
+
+##### 一、核心技术背景：NETLINK_CONNECTOR 与 CSI 采集
+
+要理解代码，首先需要明确其依赖的核心技术 ——**Linux Netlink 通信机制**：
+
+- **Netlink**：是 Linux 内核与用户态程序之间的 “高速双向通信通道”，相比传统的`ioctl`、`procfs`，它支持异步通信、多播分组，更适合实时数据传输（如 CSI 这类高频产生的无线信号数据）。
+- **NETLINK_CONNECTOR**：是 Netlink 的一个子协议（协议类型`NETLINK_CONNECTOR`），专门用于 “内核子系统→用户态程序” 的标准化数据转发，比如 Intel iwlwifi 无线网卡驱动（`iwlagn`）会通过该协议的`CN_IDX_IWLAGN`分组（组索引），将采集到的 CSI 数据上报给用户态。
+
+##### 二、代码整体结构与核心流程
+
+代码遵循 “**初始化→通信建立→数据接收→存储退出**” 的线性流程，每个模块职责明确，且包含完善的错误处理和资源管理。整体结构如下：
+
+```mermaid
+graph TD
+    A[参数检查] --> B[打开输出文件]
+    B --> C[创建Netlink Socket]
+    C --> D[初始化Netlink地址]
+    D --> E[绑定Socket并订阅内核组]
+    E --> F[注册信号处理（Ctrl+C/定时）]
+    F --> G[循环接收内核CSI数据]
+    G --> H[解析数据并写入文件]
+    H --> I[达到采集时间/触发信号→优雅退出]
+```
+
+##### 三、关键模块逐行解析（原理 + 作用）
+
+###### 1. 宏定义与全局变量：配置与状态存储
+
+```c
+#define MAX_PAYLOAD 2048   // 预留的最大数据载荷（未直接使用，为扩展预留）
+#define SLOW_MSG_CNT 100   // 每接收100条数据打印一次调试信息，避免日志刷屏
+
+int sock_fd = -1; // Netlink Socket文件描述符（-1表示未初始化）
+FILE *out = NULL; // 输出文件指针（存储CSI数据的dat文件）
+```
+
+- 全局变量的设计目的：让信号处理函数（如`caught_signal`）能访问并释放`socket`和`文件`资源（局部变量无法跨函数访问）。
+
+###### 2. 信号处理函数：优雅退出的保障
+
+代码设计了 3 个信号处理函数，核心是**确保程序退出时释放资源（关闭文件、socket），避免数据损坏或内存泄漏**。
+
+| 函数名                    | 触发信号         | 核心作用                                                     |
+| ------------------------- | ---------------- | ------------------------------------------------------------ |
+| `caught_signal`           | SIGINT（Ctrl+C） | 捕获用户手动中断信号，打印提示并调用`exit_program`退出       |
+| `exit_program_with_alarm` | SIGALRM（闹钟）  | 捕获定时信号（采集时间到），直接调用`exit_program`退出       |
+| `exit_program`            | 通用退出入口     | 关闭打开的文件和 socket，释放资源后退出（所有退出路径最终都会调用此函数） |
+| `exit_program_err`        | 系统调用错误     | 打印错误信息（如`socket`创建失败），再调用`exit_program`退出 |
+
+**示例：exit_program 的资源释放逻辑**
+
+```c
+void exit_program(int code)
+{
+    if (out) { fclose(out); out = NULL; } // 关闭文件，避免文件损坏
+    if (sock_fd != -1) { close(sock_fd); sock_fd = -1; } // 关闭socket，释放句柄
+    exit(code);
+}
+```
+
+###### 3. main 函数：核心业务逻辑
+
+main 函数是程序的 “总指挥”，串联所有模块，可分为**7 个关键步骤**：
+
+**步骤 1：信号初始化（定时退出准备）**
+
+```c
+signal(SIGALRM, exit_program_with_alarm); // 绑定SIGALRM信号到定时退出函数
+```
+
+- 作用：为后续 “指定采集时间” 功能铺路，当`alarm()`触发时，程序会自动退出。
+
+**步骤 2：参数检查（确保输入合法）**
+
+```c
+check_usage(argc, argv); // 检查参数数量是否为3（程序名+输出文件+采集时间）
+```
+
+- 合法参数格式：`./程序名 csi_output.dat 60`（表示采集 60 秒，数据存到 csi_output.dat）；
+- 若参数错误，打印用法提示并退出，避免后续逻辑因参数缺失崩溃。
+
+**步骤 3：打开输出文件**
+
+```c
+out = open_file(argv[1], "w"); // 以“只写”模式打开输出文件（argv[1]是输出文件名）
+```
+
+- `open_file`函数会检查文件是否成功打开（如权限不足、路径不存在），若失败则打印`perror`信息并退出。
+
+**步骤 4：创建 Netlink Socket（内核通信通道）**
+
+```c
+sock_fd = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_CONNECTOR);
+```
+
+- 参数解析：
+  - `PF_NETLINK`：指定协议族为 Netlink（对应地址族`AF_NETLINK`）；
+  - `SOCK_DGRAM`：使用数据报模式（Netlink 支持`SOCK_DGRAM`/`SOCK_RAW`，前者更轻量）；
+  - `NETLINK_CONNECTOR`：指定 Netlink 子协议为 “连接器”，用于接收内核子系统（如 iwlwifi）的上报数据。
+- 若`socket`创建失败（返回 - 1），调用`exit_program_err`打印 “socket” 错误并退出。
+
+**步骤 5：初始化 Netlink 地址（定位通信对象）**
+
+Netlink 通信需要明确 “发送方” 和 “接收方” 的地址，这里是 “用户态程序←内核” 的单向通信，地址结构为`struct sockaddr_nl`：
+
+```c
+// 用户态程序地址（proc_addr）：内核会用这个地址发送数据
+memset(&proc_addr, 0, sizeof(struct sockaddr_nl));
+proc_addr.nl_family = AF_NETLINK;    // 地址族为Netlink
+proc_addr.nl_pid = getpid();         // 标识用户态进程（内核用PID定位接收进程）
+proc_addr.nl_groups = CN_IDX_IWLAGN; // 订阅的内核组：iwlwifi CSI上报组（关键！）
+
+// 内核地址（kern_addr）：用户态无需设置PID（内核PID为0）
+memset(&kern_addr, 0, sizeof(struct sockaddr_nl));
+kern_addr.nl_family = AF_NETLINK;
+kern_addr.nl_pid = 0;                // 内核的PID固定为0
+kern_addr.nl_groups = CN_IDX_IWLAGN;
+```
+
+- **关键：CN_IDX_IWLAGN**：这是 Intel iwlwifi 驱动定义的 “CSI 数据上报组索引”，只有订阅该组，才能接收到内核发送的 CSI 数据（需内核编译时开启`CONFIG_IWLWIFI`和 CSI 相关配置）。
+
+**步骤 6：绑定 Socket + 订阅内核组**
+
+```c
+// 绑定Socket到用户态地址（proc_addr）
+if (bind(sock_fd, (struct sockaddr *)&proc_addr, sizeof(struct sockaddr_nl)) == -1)
+    exit_program_err(-1, "bind");
+
+// 订阅Netlink组（加入CN_IDX_IWLAGN组，才能接收该组的内核数据）
+int on = proc_addr.nl_groups;
+ret = setsockopt(sock_fd, 270, NETLINK_ADD_MEMBERSHIP, &on, sizeof(on));
+```
+
+- `bind`：将`sock_fd`与用户态地址绑定，确保内核能准确将数据发送到当前进程；
+- `setsockopt`：通过`NETLINK_ADD_MEMBERSHIP`选项，将当前进程加入`CN_IDX_IWLAGN`组，这是接收 CSI 数据的 “准入许可”。
+
+**步骤 7：循环接收并处理内核数据（核心业务）**
+
+```c
+while (1) {
+    // 1. 从Netlink Socket接收内核数据（阻塞等待，直到有数据）
+    ret = recv(sock_fd, buf, sizeof(buf), 0);
+    if (ret == -1) exit_program_err(-1, "recv");
+
+    // 2. 解析Netlink消息：提取cn_msg结构体（NETLINK_CONNECTOR的标准消息格式）
+    cmsg = NLMSG_DATA(buf); // NLMSG_DATA：跳过Netlink消息头，获取实际cn_msg数据
+
+    // 3. 调试信息：每100条数据打印一次（避免日志过多）
+    if (count % SLOW_MSG_CNT == 0)
+        printf("received %d bytes: counts: %d id: %d val: %d seq: %d clen: %d\n", 
+               cmsg->len, count, cmsg->id.idx, cmsg->id.val, cmsg->seq, cmsg->len);
+
+    // 4. 结构化写入数据到文件（关键：先存长度，再存数据，避免解析粘包）
+    l = (unsigned short)cmsg->len;       // 当前CSI数据块的长度
+    l2 = htons(l);                       // 转成网络字节序（避免大小端问题）
+    fwrite(&l2, 1, sizeof(unsigned short), out); // 第一步：写入数据长度
+    ret = fwrite(cmsg->data, 1, l, out); // 第二步：写入实际CSI数据
+    ++count;
+
+    // 5. 第一次接收数据时，设置采集闹钟（确保通信正常后再计时）
+    if (count == 1) alarm((*argv[2] - '0'));
+
+    // 6. 检查数据是否完整写入
+    if (ret != l) exit_program_err(1, "fwrite");
+}
+```
+
+**关键解析**：
+
+- **cn_msg 结构体**：NETLINK_CONNECTOR 的标准消息格式，包含 CSI 数据的元信息和实际内容：
+
+```c
+struct cn_msg {
+    struct cn_id id;    // 消息来源标识（idx=CN_IDX_IWLAGN，val=CN_VAL_IWLAGN）
+    __u32 seq;          // 序列号（用于校验数据顺序，避免丢失）
+    __u32 len;          // data字段的长度（实际CSI数据长度）
+    __u8 data[0];       // 实际CSI原始数据（柔性数组，长度由len指定）
+};
+```
+
+- **结构化存储逻辑**：先写入`len`（转网络字节序`htons`，解决不同 CPU 大小端差异），再写入`data`，后续解析时（如 MATLAB）可通过 “先读长度→再读对应长度的数据” 避免粘包，确保每个 CSI 数据块独立可解析；
+- **闹钟设置时机**：`count==1`时才设置`alarm`（采集时间），是为了确保 “内核 - 用户态通信正常” 后再开始计时，避免通信失败却空等计时的问题。
+
+##### 四、代码设计思想与优势
+
+1. **实时性优先**：基于 Netlink 的异步通信，相比文件 IO（如`/proc`），能低延迟接收高频 CSI 数据（适合无线信号实时采集）；
+2. **结构化数据存储**：“先存长度 + 再存数据” 的格式设计，从源头避免后续解析的 “粘包问题”，降低下游处理复杂度；
+3. **优雅退出机制**：完善的信号处理（Ctrl+C、定时）和资源释放（关闭文件、socket），确保程序无论正常还是异常退出，都不会导致文件损坏或资源泄漏；
+4. 灵活性与可调试性：
+   - 可配置输出文件和采集时间，适配不同采集场景；
+   - 每 100 条数据打印一次调试信息，便于排查通信是否正常（如数据长度、序列号是否连续）；
+5. **内核兼容性**：基于标准 NETLINK_CONNECTOR 协议和`CN_IDX_IWLAGN`组，兼容 Intel iwlwifi 系列网卡（如 5300、AX200）的 CSI 上报驱动，无需修改内核代码。
+
+##### 五、与用户之前流程的衔接
+
+这段代码是用户 CSI 采集链路的 “源头”，与后续 MATLAB 程序的衔接逻辑如下：
+
+1. 运行本程序：`./csi_collector csi_raw.dat 30`（采集 30 秒 CSI 数据，存为`csi_raw.dat`）；
+2. MATLAB 读取`csi_raw.dat`：按 “先读 2 字节长度→再读对应长度数据” 解析出每个 CSI 数据块；
+3. MATLAB 乒乓写入`csi_0.mat`/`csi_1.mat`：与用户之前的 TCP 发送程序配合，实现 “采集→存储→传输” 的完整链路。
+
+##### 六、注意事项（运行前提）
+
+1. **内核配置**：Linux 内核需开启`CONFIG_NETLINK_CONNECTOR`、`CONFIG_IWLWIFI`和 CSI 相关选项（如`CONFIG_IWLWIFI_CSI`）；
+2. **驱动支持**：需安装支持 CSI 上报的 iwlwifi 驱动（如`linux-80211n-csitool`补丁驱动）；
+3. **权限**：运行程序需 root 权限（Netlink 通信和无线网卡操作需要管理员权限）。
+
+综上，这段代码是一个 “轻量、可靠、标准化” 的 Linux 用户态 CSI 采集工具，核心价值是打通 “内核 CSI 数据→用户态文件存储” 的通道，为后续数据处理提供高质量的原始数据。
